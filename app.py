@@ -1,8 +1,3 @@
-diff --git a/app.py b/app.py
-index 66857ec0e24e78bcd322a0a37becbf42a1dc688d..6acd4284fc2e76f8c56dca5b86aa52099a9bda51 100644
---- a/app.py
-+++ b/app.py
-@@ -1,13 +1,268 @@
 +import math
 +import random
 +from dataclasses import dataclass
