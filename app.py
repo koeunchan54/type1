@@ -279,3 +279,11 @@ index 66857ec0e24e78bcd322a0a37becbf42a1dc688d..6acd4284fc2e76f8c56dca5b86aa5209
 +    st.session_state.insights = []
 +    st.session_state.last_ai_move = "-"
 +    st.rerun()
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..22ebb2f7d7414f510a96503e39796ac47256c06b
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,2 @@
++streamlit
++python-chess
