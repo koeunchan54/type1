@@ -1,4 +1,2 @@
-# Pin to widely compatible versions for Streamlit Community Cloud
 streamlit==1.39.0
-chess==1.10.0
-
+requests==2.32.3
