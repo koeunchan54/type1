@@ -1,4 +1,13 @@
 # Pin to widely compatible versions for Streamlit Community Cloud
-streamlit==1.39.0
-chess==1.10.0
+diff --git a/requirements.txt b/requirements.txt
+index a18ad425f71a910c5d26896e46437028ed0042e6..b495292aed77d11d2dbabe1a2f492324fbc7c58a 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,4 +1,2 @@
+-# Pin to widely compatible versions for Streamlit Community Cloud
+ streamlit==1.39.0
+-chess==1.10.0
+-
++requests==2.32.3
+
 
