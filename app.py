@@ -18,6 +18,9 @@ SYMBOLS = {
     "SK하이닉스": {"krx": "000660", "yahoo": "000660.KS", "investing_slug": "sk-hynix-inc"},
 }
 
+GOOGLE_SYMBOLS = {"삼성전자": "KRX:005930", "SK하이닉스": "KRX:000660"}
+
+
 
 @dataclass
 class Quote:
@@ -58,6 +61,23 @@ def fetch_investing_price(slug: str, company: str) -> tuple[str, float, datetime
         return None
 
 
+
+
+def fetch_google_price(google_symbol: str) -> tuple[str, float, datetime] | None:
+    url = f"https://www.google.com/finance/quote/{google_symbol}"
+    try:
+        res = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"})
+        res.raise_for_status()
+        m = re.search(r'data-last-price="([0-9,.]+)"', res.text)
+        if not m:
+            m = re.search(r'"price"\s*:\s*"([0-9,.]+)"', res.text)
+        if not m:
+            return None
+        price = float(m.group(1).replace(",", ""))
+        return ("Google Finance", price, datetime.now(tz=UTC))
+    except Exception:
+        return None
+
 def get_live_quotes() -> tuple[list[Quote], list[str]]:
     quotes: list[Quote] = []
     warnings: list[str] = []
@@ -69,10 +89,10 @@ def get_live_quotes() -> tuple[list[Quote], list[str]]:
         else:
             warnings.append(f"{company}: Yahoo Finance 데이터를 불러오지 못했습니다.")
 
+        inferred_shares = (y.market_cap_krw / y.price_krw) if y and y.price_krw else 0.0
+
         inv = fetch_investing_price(ids["investing_slug"], company)
-        if inv and y:
-            # investing은 가격만 제공하므로 시총은 Yahoo 주식수 역산값을 사용
-            inferred_shares = y.market_cap_krw / y.price_krw if y.price_krw else 0.0
+        if inv and inferred_shares:
             quotes.append(
                 Quote(
                     source=inv[0],
@@ -85,6 +105,20 @@ def get_live_quotes() -> tuple[list[Quote], list[str]]:
         elif not inv:
             warnings.append(f"{company}: Investing.com 가격 파싱에 실패했습니다.")
 
+        goog = fetch_google_price(GOOGLE_SYMBOLS[company])
+        if goog and inferred_shares:
+            quotes.append(
+                Quote(
+                    source=goog[0],
+                    company=company,
+                    price_krw=goog[1],
+                    market_cap_krw=goog[1] * inferred_shares,
+                    updated_at=goog[2],
+                )
+            )
+        elif not goog:
+            warnings.append(f"{company}: Google Finance 가격 파싱에 실패했습니다.")
+
     return quotes, warnings
 
 
@@ -93,7 +127,7 @@ def fmt_krw(v: float) -> str:
 
 
 st.title("📊 삼성전자 vs SK하이닉스 실시간 시가총액 비교")
-st.caption("소스: Yahoo Finance + Investing.com (Toss/Google은 공식 실시간 공개 API 부재로 미연동)")
+st.caption("소스: Yahoo Finance + Investing.com + Google Finance (Toss는 공식 실시간 공개 API 부재)")
 
 if st.button("지금 새로고침", type="primary"):
     st.cache_data.clear()
@@ -150,5 +184,5 @@ st.dataframe(
 
 st.info(
     "참고: Investing.com은 페이지 파싱 기반이라 구조 변경 시 실패할 수 있습니다. "
-    "Google Finance/Toss는 공식 무료 실시간 시세 API가 없어 현재 버전에서는 연동하지 않았습니다."
+    "Google Finance는 페이지 파싱으로 연동했고, Toss는 공식 무료 실시간 API 부재로 미연동 상태입니다."
 )
