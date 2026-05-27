@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from html import unescape
+from urllib.parse import quote_plus
 import re
+import xml.etree.ElementTree as ET
 
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="삼성전자 vs SK하이닉스 시가총액", layout="wide")
+st.set_page_config(page_title="증시 모니터링 통합 대시보드", layout="wide")
 
-REQUEST_TIMEOUT = 8
-USER_AGENT = "Mozilla/5.0 (MarketCapMonitor/1.0)"
 UTC = timezone.utc
+REQUEST_TIMEOUT = 8
+MAX_ITEMS_PER_SOURCE = 18
+USER_AGENT = "Mozilla/5.0 (MarketCapMonitor/1.0)"
 
+
+# ---------- 시총 비교 ----------
 SYMBOLS = {
-    "삼성전자": {"krx": "005930", "yahoo": "005930.KS", "investing_slug": "samsung-elec"},
-    "SK하이닉스": {"krx": "000660", "yahoo": "000660.KS", "investing_slug": "sk-hynix-inc"},
+    "삼성전자": {"yahoo": "005930.KS", "investing_slug": "samsung-elec", "google": "KRX:005930"},
+    "SK하이닉스": {"yahoo": "000660.KS", "investing_slug": "sk-hynix-inc", "google": "KRX:000660"},
 }
-
-GOOGLE_SYMBOLS = {"삼성전자": "KRX:005930", "SK하이닉스": "KRX:000660"}
-
 
 
 @dataclass
@@ -37,100 +40,164 @@ def fetch_yahoo_quote(yahoo_symbol: str, company: str) -> Quote | None:
         res = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT})
         res.raise_for_status()
         data = res.json()["quoteResponse"]["result"][0]
-        price = float(data["regularMarketPrice"])
-        mcap = float(data["marketCap"])
-        ts = datetime.fromtimestamp(int(data.get("regularMarketTime", datetime.now(tz=UTC).timestamp())), tz=UTC)
-        return Quote("Yahoo Finance", company, price, mcap, ts)
+        return Quote(
+            "Yahoo Finance",
+            company,
+            float(data["regularMarketPrice"]),
+            float(data["marketCap"]),
+            datetime.fromtimestamp(int(data.get("regularMarketTime", datetime.now(tz=UTC).timestamp())), tz=UTC),
+        )
     except Exception:
         return None
 
 
-def fetch_investing_price(slug: str, company: str) -> tuple[str, float, datetime] | None:
-    url = f"https://www.investing.com/equities/{slug}"
+def fetch_investing_price(slug: str) -> tuple[str, float, datetime] | None:
     try:
-        res = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"})
+        res = requests.get(
+            f"https://www.investing.com/equities/{slug}",
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+        )
         res.raise_for_status()
-        m = re.search(r'"last"\s*:\s*"([0-9,]+(?:\\.[0-9]+)?)"', res.text)
-        if not m:
-            m = re.search(r'data-test="instrument-price-last">\s*([0-9,]+(?:\.[0-9]+)?)\s*<', res.text)
+        m = re.search(r'"last"\s*:\s*"([0-9,]+(?:\\.[0-9]+)?)"', res.text) or re.search(
+            r'data-test="instrument-price-last">\s*([0-9,]+(?:\.[0-9]+)?)\s*<', res.text
+        )
         if not m:
             return None
-        price = float(m.group(1).replace(",", ""))
-        return ("Investing.com", price, datetime.now(tz=UTC))
+        return "Investing.com", float(m.group(1).replace(",", "")), datetime.now(tz=UTC)
     except Exception:
         return None
 
 
-
-
-def fetch_google_price(google_symbol: str) -> tuple[str, float, datetime] | None:
-    url = f"https://www.google.com/finance/quote/{google_symbol}"
+def fetch_google_price(symbol: str) -> tuple[str, float, datetime] | None:
     try:
-        res = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"})
+        res = requests.get(
+            f"https://www.google.com/finance/quote/{symbol}",
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+        )
         res.raise_for_status()
-        m = re.search(r'data-last-price="([0-9,.]+)"', res.text)
-        if not m:
-            m = re.search(r'"price"\s*:\s*"([0-9,.]+)"', res.text)
+        m = re.search(r'data-last-price="([0-9,.]+)"', res.text) or re.search(r'"price"\s*:\s*"([0-9,.]+)"', res.text)
         if not m:
             return None
-        price = float(m.group(1).replace(",", ""))
-        return ("Google Finance", price, datetime.now(tz=UTC))
+        return "Google Finance", float(m.group(1).replace(",", "")), datetime.now(tz=UTC)
     except Exception:
         return None
+
 
 def get_live_quotes() -> tuple[list[Quote], list[str]]:
     quotes: list[Quote] = []
-    warnings: list[str] = []
-
+    warns: list[str] = []
     for company, ids in SYMBOLS.items():
         y = fetch_yahoo_quote(ids["yahoo"], company)
         if y:
             quotes.append(y)
         else:
-            warnings.append(f"{company}: Yahoo Finance 데이터를 불러오지 못했습니다.")
+            warns.append(f"{company}: Yahoo Finance 수집 실패")
+            continue
 
-        inferred_shares = (y.market_cap_krw / y.price_krw) if y and y.price_krw else 0.0
+        shares = y.market_cap_krw / y.price_krw if y.price_krw else 0.0
 
-        inv = fetch_investing_price(ids["investing_slug"], company)
-        if inv and inferred_shares:
-            quotes.append(
-                Quote(
-                    source=inv[0],
-                    company=company,
-                    price_krw=inv[1],
-                    market_cap_krw=inv[1] * inferred_shares,
-                    updated_at=inv[2],
-                )
-            )
-        elif not inv:
-            warnings.append(f"{company}: Investing.com 가격 파싱에 실패했습니다.")
+        inv = fetch_investing_price(ids["investing_slug"])
+        if inv:
+            quotes.append(Quote(inv[0], company, inv[1], inv[1] * shares, inv[2]))
+        else:
+            warns.append(f"{company}: Investing.com 파싱 실패")
 
-        goog = fetch_google_price(GOOGLE_SYMBOLS[company])
-        if goog and inferred_shares:
-            quotes.append(
-                Quote(
-                    source=goog[0],
-                    company=company,
-                    price_krw=goog[1],
-                    market_cap_krw=goog[1] * inferred_shares,
-                    updated_at=goog[2],
-                )
-            )
-        elif not goog:
-            warnings.append(f"{company}: Google Finance 가격 파싱에 실패했습니다.")
+        goog = fetch_google_price(ids["google"])
+        if goog:
+            quotes.append(Quote(goog[0], company, goog[1], goog[1] * shares, goog[2]))
+        else:
+            warns.append(f"{company}: Google Finance 파싱 실패")
 
-    return quotes, warnings
+    return quotes, warns
 
 
-def fmt_krw(v: float) -> str:
-    return f"₩{v:,.0f}"
+# ---------- 뉴스 터미널(복원) ----------
+@dataclass
+class SourceConfig:
+    name: str
+    url: str
+    source_type: str
+    credibility: int
 
 
-st.title("📊 삼성전자 vs SK하이닉스 실시간 시가총액 비교")
-st.caption("소스: Yahoo Finance + Investing.com + Google Finance (Toss는 공식 실시간 공개 API 부재)")
+@dataclass
+class NewsItem:
+    id: str
+    source: str
+    source_type: str
+    credibility: int
+    title_en: str
+    title_ko: str
+    link: str
+    published: datetime | None
+    summary: str
+    impact_score: float
 
-if st.button("지금 새로고침", type="primary"):
-    st.cache_data.clear()
+
+TRUSTED_MEDIA_SOURCES: list[SourceConfig] = [
+    SourceConfig("Reuters Business", "https://feeds.reuters.com/reuters/businessNews", "media", 5),
+    SourceConfig("AP Business", "https://apnews.com/hub/business/rss", "media", 5),
+    SourceConfig("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html", "media", 4),
+]
+
+
+def social_sources(keyword: str) -> list[SourceConfig]:
+    encoded = quote_plus(keyword)
+    return [
+        SourceConfig("Reddit r/investing", "https://www.reddit.com/r/investing/.rss", "social", 2),
+        SourceConfig("Reddit r/stocks", f"https://www.reddit.com/r/stocks/search.rss?q={encoded}&restrict_sr=1&sort=new", "social", 2),
+    ]
+
+
+def clean_html(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", unescape(text or ""))).strip()
+
+
+def parse_dt(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    for fmt in ["%a, %d %b %Y %H:%M:%S %z", "%Y-%m-%dT%H:%M:%SZ"]:
+        try:
+            return datetime.strptime(raw, fmt).astimezone(UTC)
+        except ValueError:
+            pass
+    return None
+
+
+def translate_title(t: str) -> str:
+    return t.replace("inflation", "인플레이션").replace("rate cut", "금리 인하")
+
+
+def fetch_source(src: SourceConfig) -> list[NewsItem]:
+    try:
+        r = requests.get(src.url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT})
+        r.raise_for_status()
+        root = ET.fromstring(r.text)
+    except Exception:
+        return []
+    entries = root.findall(".//item") + root.findall(".//{http://www.w3.org/2005/Atom}entry")
+    out: list[NewsItem] = []
+    for i, it in enumerate(entries[:MAX_ITEMS_PER_SOURCE], 1):
+        title = clean_html((it.findtext("title") or it.findtext("{http://www.w3.org/2005/Atom}title") or ""))
+        if not title:
+            continue
+        desc = clean_html(it.findtext("description") or it.findtext("summary") or "")
+        dt = parse_dt(it.findtext("pubDate") or it.findtext("published"))
+        link = clean_html(it.findtext("link") or "")
+        score = (1.0 if "beat" in (title + desc).lower() else 0.0) - (1.0 if "miss" in (title + desc).lower() else 0.0)
+        out.append(NewsItem(f"{src.name}-{i}", src.name, src.source_type, src.credibility, title, translate_title(title), link, dt, desc, score))
+    return out
+
+
+def collect_news(keyword: str) -> list[NewsItem]:
+    items: list[NewsItem] = []
+    for src in TRUSTED_MEDIA_SOURCES + social_sources(keyword):
+        items.extend(fetch_source(src))
+    cutoff = datetime.now(tz=UTC) - timedelta(days=7)
+    filtered = [x for x in items if x.published is None or x.published >= cutoff]
+    return sorted(filtered, key=lambda x: (abs(x.impact_score), x.published or datetime(1970, 1, 1, tzinfo=UTC)), reverse=True)[:40]
 
 
 @st.cache_data(ttl=20)
@@ -138,51 +205,44 @@ def cached_quotes() -> tuple[list[Quote], list[str]]:
     return get_live_quotes()
 
 
-quotes, warnings = cached_quotes()
+@st.cache_data(ttl=120)
+def cached_news(keyword: str) -> list[NewsItem]:
+    return collect_news(keyword)
 
-if warnings:
+
+# ---------- UI ----------
+st.title("📈 증시 모니터링 통합 대시보드")
+tab1, tab2 = st.tabs(["시가총액 비교", "미국 증시 뉴스 터미널"])
+
+with tab1:
+    st.caption("소스: Yahoo Finance + Investing.com + Google Finance (Toss는 공식 실시간 API 부재)")
+    if st.button("시총 데이터 새로고침", type="primary"):
+        st.cache_data.clear()
+    quotes, warnings = cached_quotes()
     for w in warnings:
         st.warning(w)
+    if not quotes:
+        st.error("실시간 데이터를 가져오지 못했습니다.")
+    else:
+        source = st.selectbox("비교 데이터 소스", sorted({q.source for q in quotes}))
+        chosen = [q for q in quotes if q.source == source]
+        samsung = next((q for q in chosen if q.company == "삼성전자"), None)
+        hynix = next((q for q in chosen if q.company == "SK하이닉스"), None)
+        if samsung and hynix:
+            ratio = (hynix.market_cap_krw / samsung.market_cap_krw * 100) if samsung.market_cap_krw else 0.0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("삼성전자 시총", f"₩{samsung.market_cap_krw:,.0f}", f"주가 ₩{samsung.price_krw:,.0f}")
+            c2.metric("SK하이닉스 시총", f"₩{hynix.market_cap_krw:,.0f}", f"주가 ₩{hynix.price_krw:,.0f}")
+            c3.metric("하이닉스/삼성", f"{ratio:.2f}%")
 
-if not quotes:
-    st.error("실시간 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.")
-    st.stop()
-
-source = st.selectbox("비교 데이터 소스", sorted({q.source for q in quotes}))
-chosen = [q for q in quotes if q.source == source]
-
-samsung = next((q for q in chosen if q.company == "삼성전자"), None)
-hynix = next((q for q in chosen if q.company == "SK하이닉스"), None)
-
-if not samsung or not hynix:
-    st.error("선택한 소스에 두 종목 데이터가 모두 없습니다.")
-    st.stop()
-
-ratio = (hynix.market_cap_krw / samsung.market_cap_krw * 100) if samsung.market_cap_krw else 0.0
-
-c1, c2, c3 = st.columns(3)
-c1.metric("삼성전자 시가총액", fmt_krw(samsung.market_cap_krw), f"주가 {fmt_krw(samsung.price_krw)}")
-c2.metric("SK하이닉스 시가총액", fmt_krw(hynix.market_cap_krw), f"주가 {fmt_krw(hynix.price_krw)}")
-c3.metric("하이닉스/삼성 비율", f"{ratio:.2f}%")
-
-st.progress(min(max(ratio / 100, 0.0), 1.0), text=f"현재 SK하이닉스 시총은 삼성전자의 {ratio:.2f}%")
-
-st.markdown("### 원시 데이터")
-st.dataframe(
-    [
-        {
-            "source": q.source,
-            "company": q.company,
-            "price_krw": round(q.price_krw, 2),
-            "market_cap_krw": round(q.market_cap_krw, 2),
-            "updated_at_utc": q.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        for q in chosen
-    ],
-    use_container_width=True,
-)
-
-st.info(
-    "참고: Investing.com은 페이지 파싱 기반이라 구조 변경 시 실패할 수 있습니다. "
-    "Google Finance는 페이지 파싱으로 연동했고, Toss는 공식 무료 실시간 API 부재로 미연동 상태입니다."
-)
+with tab2:
+    kw = st.text_input("소셜 키워드", value="US stocks")
+    if st.button("뉴스 새로고침"):
+        cached_news.clear()
+    news = cached_news(kw)
+    st.write(f"수집 기사: {len(news)}건")
+    for n in news[:20]:
+        when = n.published.strftime("%m-%d %H:%M") if n.published else "시각 미상"
+        st.markdown(f"- **{n.title_ko}** ({n.source}, {when})")
+        if n.summary:
+            st.caption(n.summary[:160])
